@@ -21,8 +21,18 @@ Grounding and guardrails: the extraction prompt is constrained to facts stated i
 
 Latency: the baseline and judge calls for all records run in parallel, and transient 429/503 errors are retried with exponential backoff.
 
+## Cost and abuse protection
+| Layer | Limit |
+|---|---|
+| Interview | Max 6 farmer answers per interview, enforced atomically in a Firestore transaction |
+| Extraction | Runs once per interview (repeat calls return the saved records); max 4 records per run |
+| Gemini budget | Global cap of 300 AI calls per day, counted in Firestore so it holds across instances and restarts |
+| Requests | 30 POST requests per minute per IP; inputs capped (2,000 characters, 5 MB audio) |
+| Cloud Run | Scale-to-zero, max 1 instance |
+| Billing brake | A Cloud Billing budget publishes to Pub/Sub; the Cloud Function in `ops/billing-kill-switch` disables billing for the project if spend reaches the budget |
+
 ## Try it (judges)
-- **Quick path:** Capture → *Start interview* → press *Use sample answer* then *Send* 3–4 times → *Extract* → **Verify** tab → approve a record → **Dataset** tab → download JSONL.
+- **Quick path:** Capture → *Start interview* → press *Use sample answer* then *Send* 3–4 times (max 6 answers per interview) → *Extract* → **Verify** tab → approve a record → **Dataset** tab → download JSONL.
 - **Instant path:** in the Verify tab, click *Load simulated sample records*.
 - The sample farmer, Tanaka Hiroshi from Uonuma, Niigata, is **simulated**, and those records are labelled.
 - Interview turns take about 3–6 s (median 4.4 s), and *Extract* takes about 20–60 s (median 29 s). Please keep inputs to a few sentences.
