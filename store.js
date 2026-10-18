@@ -2,13 +2,15 @@
 import { randomUUID } from "node:crypto";
 
 function memoryStore() {
-  const db = { sessions: new Map(), records: new Map() };
+  const db = { sessions: new Map(), records: new Map(), usage: new Map() };
   return {
     kind: "memory",
     async create(col, data) { const id = randomUUID().slice(0, 12); const doc = { id, ...data }; db[col].set(id, doc); return doc; },
     async get(col, id) { return db[col].get(id) || null; },
     async update(col, id, patch) { const d = { ...db[col].get(id), ...patch }; db[col].set(id, d); return d; },
     async list(col) { return [...db[col].values()]; },
+    // Atomically read-modify-write one doc. fn(doc|null) returns a patch or throws to abort.
+    async txUpdate(col, id, fn) { const cur = db[col].get(id) || null; const patch = fn(cur); const d = { ...(cur || { id }), ...patch }; db[col].set(id, d); return d; },
   };
 }
 
@@ -24,6 +26,17 @@ async function firestoreStore() {
     async get(col, id) { const s = await fs.collection(col).doc(id).get(); return s.exists ? { id: s.id, ...s.data() } : null; },
     async update(col, id, patch) { const ref = fs.collection(col).doc(id); await ref.set(patch, { merge: true }); const s = await ref.get(); return { id, ...s.data() }; },
     async list(col) { const q = await fs.collection(col).orderBy("createdAt", "desc").limit(500).get(); return q.docs.map((d) => ({ id: d.id, ...d.data() })); },
+    // Atomically read-modify-write one doc (Firestore transaction): shared across all Cloud Run instances.
+    async txUpdate(col, id, fn) {
+      const ref = fs.collection(col).doc(id);
+      return fs.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const cur = snap.exists ? { id, ...snap.data() } : null;
+        const patch = fn(cur);
+        tx.set(ref, patch, { merge: true });
+        return { ...(cur || { id }), ...patch };
+      });
+    },
   };
 }
 

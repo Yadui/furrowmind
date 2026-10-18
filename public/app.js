@@ -31,7 +31,7 @@ const post = (path, body) => api(path, { method: "POST", headers: { "Content-Typ
 
 async function busy(btn, fn) {
   btn.disabled = true; btn.classList.add("spin");
-  try { return await fn(); } catch (e) { alert("Error: " + e.message); } finally { btn.disabled = false; btn.classList.remove("spin"); }
+  try { return await fn(); } catch (e) { alert("Error: " + e.message); } finally { btn.disabled = false; btn.classList.remove("spin"); if (session) renderSession(); }
 }
 
 function renderSession() {
@@ -43,6 +43,12 @@ function renderSession() {
     const v = Math.round((session.coverage?.[k] || 0) * 100);
     return `<div class="small">${l} · ${v}%</div><div class="bar"><i style="width:${v}%"></i></div>`;
   }).join("") + (session.readyToExtract ? `<p class="small" style="color:var(--green)">✓ Enough material to extract records</p>` : "");
+  // Turn limit: show progress and lock input when the cap is reached (server enforces it too).
+  const max = session.maxTurns || 6, used = session.farmerTurns || 0, done = used >= max || session.status !== "interviewing";
+  $("#turnInfo").textContent = session.status === "extracted" ? "Interview finished. Records extracted."
+    : used >= max ? `Answer limit reached (${max} of ${max}). Press Extract →` : `Answer ${used + 1} of ${max}`;
+  ["#send", "#mic", "#sample", "#answer"].forEach((sel) => { $(sel).disabled = done; });
+  $("#extract").disabled = session.status === "extracted" || used === 0;
 }
 
 $("#start").onclick = (e) => busy(e.target, async () => {
@@ -88,6 +94,7 @@ $("#mic").onclick = async (e) => {
 $("#extract").onclick = (e) => busy(e.target, async () => {
   $("#extractOut").innerHTML = `<p class="small muted">Gemini is structuring the records, asking a generic model the same questions, and judging the knowledge gap…</p>`;
   const { records } = await post(`/api/sessions/${session.id}/extract`, {});
+  session.status = "extracted"; renderSession();
   $("#extractOut").innerHTML = `<p><b>${records.length} judgement records</b> extracted:</p><ul class="small">${records.map((r) => `<li>${esc(r.title)} (gap ${r.judge.gap})</li>`).join("")}</ul><button class="wide" onclick="document.querySelector('[data-tab=verify]').click()">Go to verification →</button>`;
   refreshBadge();
 });

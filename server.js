@@ -20,14 +20,19 @@ app.use(express.static("public"));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 // Retry transient Gemini errors (429/503 high demand) with backoff so demos/judging survive load spikes.
-// ---- Cost caps (app level): global daily Gemini call budget + per-IP rate limit ----
-const DAILY_GEMINI_CAP = Number(process.env.DAILY_GEMINI_CAP || 1500);
-let budget = { day: new Date().toISOString().slice(0, 10), used: 0 };
-function spendGemini() {
-  const today = new Date().toISOString().slice(0, 10);
-  if (budget.day !== today) budget = { day: today, used: 0 };
-  if (budget.used >= DAILY_GEMINI_CAP) { const e = new Error("Daily AI budget reached for this demo. Please try again tomorrow, or use 'Load simulated sample records'."); e.code = 429; throw e; }
-  budget.used++;
+// ---- Cost caps (app level) ----
+// Global daily Gemini call budget, counted atomically in Firestore so it holds across instances and restarts.
+const DAILY_GEMINI_CAP = Number(process.env.DAILY_GEMINI_CAP || 300);
+const MAX_FARMER_TURNS = Number(process.env.MAX_FARMER_TURNS || 6);
+const MAX_RECORDS = Number(process.env.MAX_RECORDS || 4);
+function capError(msg, code = 429) { const e = new Error(msg); e.code = code; return e; }
+async function spendGemini() {
+  const day = new Date().toISOString().slice(0, 10);
+  await store.txUpdate("usage", day, (cur) => {
+    const used = cur?.geminiCalls || 0;
+    if (used >= DAILY_GEMINI_CAP) throw capError("Daily AI budget reached for this demo. Please try again tomorrow, or use 'Load simulated sample records' in the Verify tab.");
+    return { geminiCalls: used + 1, createdAt: cur?.createdAt || Date.now() };
+  });
 }
 const hits = new Map();
 const PER_IP_PER_MIN = Number(process.env.PER_IP_PER_MIN || 30);
@@ -43,7 +48,7 @@ function rateLimit(req, res, next) {
 app.use("/api", rateLimit);
 
 async function gemini(opts, attempt = 0) {
-  if (attempt === 0) spendGemini();
+  if (attempt === 0) await spendGemini();
   try { return await geminiOnce(opts); } catch (e) {
     const msg = String(e?.status || e?.message || e);
     if (attempt < 3 && /429|500|503|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded/i.test(msg)) {
@@ -70,7 +75,7 @@ async function geminiOnce({ system, parts, schema, temperature = 0.4 }) {
 const wrap = (fn) => (req, res) =>
   fn(req, res).catch((e) => {
     console.error(e);
-    res.status(e.code === 429 ? 429 : 500).json({ error: e.message || String(e) });
+    res.status([400, 409, 429].includes(e.code) ? e.code : 500).json({ error: e.message || String(e) });
   });
 
 // ---------- Interview (elicitation agent) ----------
@@ -112,7 +117,8 @@ app.post("/api/sessions", wrap(async (req, res) => {
     ? `${farmerName}さん、今日はありがとうございます。${crop || "作物"}を育てる中で、教科書には載っていない「勘」で判断していることを一つ教えていただけますか？`
     : `Thank you for sharing your time, ${farmerName}. In growing ${crop || "your crops"}, what is one decision you make by instinct, something a textbook would never tell a new farmer?`;
   const session = await store.create("sessions", {
-    farmerName, region, crop, years, language, status: "interviewing",
+    farmerName: String(farmerName).slice(0, 80), region: String(region).slice(0, 80), crop: String(crop).slice(0, 80), years: String(years).slice(0, 10),
+    language: language === "ja" ? "ja" : "en", status: "interviewing", farmerTurns: 0, maxTurns: MAX_FARMER_TURNS,
     transcript: [{ role: "interviewer", text: opener }],
     coverage: { cues: 0, decision: 0, rationale: 0, exceptions: 0, novice_mistakes: 0 },
     createdAt: Date.now(),
@@ -123,20 +129,30 @@ app.post("/api/sessions", wrap(async (req, res) => {
 app.get("/api/sessions/:id", wrap(async (req, res) => res.json(await store.get("sessions", req.params.id))));
 
 app.post("/api/sessions/:id/turn", upload.single("audio"), wrap(async (req, res) => {
-  const s = await store.get("sessions", req.params.id);
-  if (!s) return res.status(404).json({ error: "session not found" });
-  if (s.transcript.length >= 25) return res.status(400).json({ error: "Interview turn limit reached. Please extract records now." });
+  if (!(await store.get("sessions", req.params.id))) return res.status(404).json({ error: "session not found" });
+  // Atomically reserve a turn so parallel requests can't exceed the limit.
+  const s = await store.txUpdate("sessions", req.params.id, (cur) => {
+    if (cur.status !== "interviewing") throw capError("This interview is finished. Start a new one to continue.", 409);
+    const n = cur.farmerTurns || 0;
+    if (n >= MAX_FARMER_TURNS) throw capError(`Turn limit reached (${MAX_FARMER_TURNS} answers). Please extract the judgement records now.`, 400);
+    return { farmerTurns: n + 1 };
+  });
   const parts = [{ text: `Session language: ${s.language === "ja" ? "Japanese" : "English"}.\nFarmer profile: ${s.farmerName}, ${s.years} years, ${s.crop}, ${s.region}.\nConversation so far:\n${transcriptText(s)}\n\nThe farmer's new input follows.` }];
   if (req.file) parts.push({ inlineData: { mimeType: req.file.mimetype || "audio/webm", data: req.file.buffer.toString("base64") } });
   else parts.push({ text: `FARMER: ${String(req.body.text || "").slice(0, 2000)}` });
-  const out = await gemini({ system: INTERVIEWER, parts, schema: turnSchema });
+  let out;
+  try { out = await gemini({ system: INTERVIEWER, parts, schema: turnSchema }); }
+  catch (e) { // refund the reserved turn so a failed AI call doesn't consume it
+    await store.txUpdate("sessions", s.id, (cur) => ({ farmerTurns: Math.max(0, (cur?.farmerTurns || 1) - 1) })).catch(() => {});
+    throw e;
+  }
   s.transcript.push({ role: "farmer", text: out.farmerUtterance, audio: !!req.file });
   s.transcript.push({ role: "interviewer", text: out.nextQuestion?.trim() || (s.language === "ja" ? "ありがとうございます。若い農家への注意点や例外はありますか？" : "Thank you. Is there any exception or warning you would give a young farmer about this?") });
   // Clamp: models occasionally return 0-100 or >1 values despite the schema.
   const norm = (v) => (v > 10 ? v / 100 : v > 1 ? 1 : v);
   s.coverage = Object.fromEntries(Object.entries(out.coverage || {}).map(([k, v]) =>
     [k, Math.max(s.coverage?.[k] || 0, Math.max(0, Math.min(1, norm(Number(v) || 0))))])); // monotonic: coverage never drops
-  s.readyToExtract = out.done;
+  s.readyToExtract = out.done || s.farmerTurns >= MAX_FARMER_TURNS;
   await store.update("sessions", s.id, { transcript: s.transcript, coverage: s.coverage, readyToExtract: s.readyToExtract });
   res.json(s);
 }));
@@ -189,13 +205,23 @@ const judgeSchema = {
 };
 
 app.post("/api/sessions/:id/extract", wrap(async (req, res) => {
-  const s = await store.get("sessions", req.params.id);
-  if (!s) return res.status(404).json({ error: "session not found" });
+  const existing = await store.get("sessions", req.params.id);
+  if (!existing) return res.status(404).json({ error: "session not found" });
+  if (existing.status === "extracted") // idempotent: never pay twice for the same interview
+    return res.json({ records: (await Promise.all((existing.recordIds || []).map((id) => store.get("records", id)))).filter(Boolean) });
+  // Atomically claim extraction so double-clicks / parallel calls can't run it twice.
+  const s = await store.txUpdate("sessions", req.params.id, (cur) => {
+    if (cur.status === "extracting") throw capError("Extraction is already running for this interview. Please wait.", 409);
+    if (cur.status === "extracted") throw capError("Already extracted. Open the Verify tab.", 409);
+    if (!(cur.farmerTurns > 0)) throw capError("Answer at least one interview question before extracting.", 400);
+    return { status: "extracting" };
+  });
+  try {
   const { records } = await gemini({
     system: EXTRACTOR, schema: recordsSchema, temperature: 0.2,
     parts: [{ text: `Farmer: ${s.farmerName}, ${s.years} years farming ${s.crop} in ${s.region}.\n\n${transcriptText(s)}` }],
   });
-  const saved = await Promise.all(records.slice(0, 6).map(async (r) => {
+  const saved = await Promise.all(records.slice(0, MAX_RECORDS).map(async (r) => {
     const baseline = await gemini({
       system: "You are a helpful general-purpose farming assistant. Answer concisely (max 120 words).",
       parts: [{ text: r.evalPrompt }], temperature: 0.7,
@@ -212,6 +238,10 @@ app.post("/api/sessions/:id/extract", wrap(async (req, res) => {
   }));
   await store.update("sessions", s.id, { status: "extracted", recordIds: saved.map((r) => r.id) });
   res.json({ records: saved });
+  } catch (e) {
+    await store.update("sessions", s.id, { status: "interviewing" }).catch(() => {}); // release claim so the user can retry
+    throw e;
+  }
 }));
 
 // ---------- Verification ----------
@@ -258,7 +288,8 @@ app.get("/api/stats", wrap(async (req, res) => {
   const ss = await store.list("sessions");
   const v = rs.filter((r) => r.status === "verified");
   const avgGap = v.length ? Math.round(v.reduce((a, r) => a + (r.judge?.gap || 0), 0) / v.length) : 0;
-  res.json({ sessions: ss.length, records: rs.length, verified: v.length, pending: rs.filter((r) => r.status === "pending").length, avgGap, backend: store.kind, model: MODEL });
+  const usage = await store.get("usage", new Date().toISOString().slice(0, 10));
+  res.json({ aiCallsToday: usage?.geminiCalls || 0, aiCallCap: DAILY_GEMINI_CAP, maxTurns: MAX_FARMER_TURNS, sessions: ss.length, records: rs.length, verified: v.length, pending: rs.filter((r) => r.status === "pending").length, avgGap, backend: store.kind, model: MODEL });
 }));
 
 app.post("/api/seed", wrap(async (req, res) => {
