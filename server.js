@@ -92,8 +92,8 @@ const turnSchema = {
     coverage: {
       type: Type.OBJECT,
       properties: {
-        cues: { type: Type.NUMBER }, decision: { type: Type.NUMBER }, rationale: { type: Type.NUMBER },
-        exceptions: { type: Type.NUMBER }, novice_mistakes: { type: Type.NUMBER },
+        cues: { type: Type.NUMBER, description: "0.0 to 1.0" }, decision: { type: Type.NUMBER, description: "0.0 to 1.0" }, rationale: { type: Type.NUMBER, description: "0.0 to 1.0" },
+        exceptions: { type: Type.NUMBER, description: "0.0 to 1.0" }, novice_mistakes: { type: Type.NUMBER, description: "0.0 to 1.0" },
       },
       required: ["cues", "decision", "rationale", "exceptions", "novice_mistakes"],
     },
@@ -132,7 +132,10 @@ app.post("/api/sessions/:id/turn", upload.single("audio"), wrap(async (req, res)
   const out = await gemini({ system: INTERVIEWER, parts, schema: turnSchema });
   s.transcript.push({ role: "farmer", text: out.farmerUtterance, audio: !!req.file });
   s.transcript.push({ role: "interviewer", text: out.nextQuestion?.trim() || (s.language === "ja" ? "ありがとうございます。若い農家への注意点や例外はありますか？" : "Thank you. Is there any exception or warning you would give a young farmer about this?") });
-  s.coverage = out.coverage;
+  // Clamp: models occasionally return 0-100 or >1 values despite the schema.
+  const norm = (v) => (v > 10 ? v / 100 : v > 1 ? 1 : v);
+  s.coverage = Object.fromEntries(Object.entries(out.coverage || {}).map(([k, v]) =>
+    [k, Math.max(s.coverage?.[k] || 0, Math.max(0, Math.min(1, norm(Number(v) || 0))))])); // monotonic: coverage never drops
   s.readyToExtract = out.done;
   await store.update("sessions", s.id, { transcript: s.transcript, coverage: s.coverage, readyToExtract: s.readyToExtract });
   res.json(s);
