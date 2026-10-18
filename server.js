@@ -146,15 +146,20 @@ app.post("/api/sessions/:id/turn", upload.single("audio"), wrap(async (req, res)
     await store.txUpdate("sessions", s.id, (cur) => ({ farmerTurns: Math.max(0, (cur?.farmerTurns || 1) - 1) })).catch(() => {});
     throw e;
   }
-  s.transcript.push({ role: "farmer", text: out.farmerUtterance, audio: !!req.file });
-  s.transcript.push({ role: "interviewer", text: out.nextQuestion?.trim() || (s.language === "ja" ? "ありがとうございます。若い農家への注意点や例外はありますか？" : "Thank you. Is there any exception or warning you would give a young farmer about this?") });
+  const farmerMsg = { role: "farmer", text: out.farmerUtterance, audio: !!req.file };
+  const nextMsg = { role: "interviewer", text: out.nextQuestion?.trim() || (s.language === "ja" ? "ありがとうございます。若い農家への注意点や例外はありますか？" : "Thank you. Is there any exception or warning you would give a young farmer about this?") };
   // Clamp: models occasionally return 0-100 or >1 values despite the schema.
   const norm = (v) => (v > 10 ? v / 100 : v > 1 ? 1 : v);
-  s.coverage = Object.fromEntries(Object.entries(out.coverage || {}).map(([k, v]) =>
-    [k, Math.max(s.coverage?.[k] || 0, Math.max(0, Math.min(1, norm(Number(v) || 0))))])); // monotonic: coverage never drops
-  s.readyToExtract = out.done || s.farmerTurns >= MAX_FARMER_TURNS;
-  await store.update("sessions", s.id, { transcript: s.transcript, coverage: s.coverage, readyToExtract: s.readyToExtract });
-  res.json(s);
+  // Append atomically to the latest transcript so concurrent turns can't overwrite each other.
+  const saved = await store.txUpdate("sessions", s.id, (cur) => {
+    const coverage = Object.fromEntries(Object.entries(out.coverage || {}).map(([k, v]) =>
+      [k, Math.max(cur.coverage?.[k] || 0, Math.max(0, Math.min(1, norm(Number(v) || 0))))])); // monotonic: coverage never drops
+    return {
+      transcript: [...(cur.transcript || []), farmerMsg, nextMsg], coverage,
+      readyToExtract: !!(cur.readyToExtract || out.done || (cur.farmerTurns || 0) >= MAX_FARMER_TURNS),
+    };
+  });
+  res.json(saved);
 }));
 
 // ---------- Extraction + baseline gap (what does a generic model miss?) ----------
