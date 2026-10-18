@@ -25,7 +25,7 @@ Latency: the baseline and judge calls for all records run in parallel, and trans
 - **Quick path:** Capture → *Start interview* → press *Use sample answer* then *Send* 3–4 times → *Extract* → **Verify** tab → approve a record → **Dataset** tab → download JSONL.
 - **Instant path:** in the Verify tab, click *Load simulated sample records*.
 - The sample farmer, Tanaka Hiroshi from Uonuma, Niigata, is **simulated**, and those records are labelled.
-- Each Gemini step takes about 5–20 s, and *Extract* takes the longest. Please keep inputs to a few sentences.
+- Interview turns take about 3–6 s (median 4.4 s), and *Extract* takes about 20–60 s (median 29 s). Please keep inputs to a few sentences.
 
 ## Run locally
 ```bash
