@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>FurrowMind: farm judgement, verified</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">◒</span> FurrowMind <small>Expert farm judgement → verified AI training data</small></div>
+  <nav>
+    <button data-tab="capture" class="on">1 · Capture</button>
+    <button data-tab="verify">2 · Verify <b id="pendingN"></b></button>
+    <button data-tab="dataset">3 · Dataset</button>
+  </nav>
+</header>
+
+<main>
+  <section id="capture" class="tab on">
+    <div id="setup" class="card">
+      <h2>Interview a veteran farmer</h2>
+      <p class="muted">Gemini runs the interview. It asks one probing question at a time to surface the cues, thresholds and exceptions that never made it into a textbook. Farmers can type or speak, in Japanese or English.</p>
+      <p class="small" style="background:#f6f3ec;padding:10px;border-radius:8px"><b>Judges, quick path:</b> press Start, then press <i>Use sample answer</i> and <i>Send</i> 3–4 times. Press <i>Extract</i>, then verify a record in tab 2 and download the dataset in tab 3. The sample farmer is simulated. Each Gemini step takes about 5–20 s.</p>
+      <div class="grid">
+        <label>Farmer name<input id="fName" value="Tanaka Hiroshi" /></label>
+        <label>Years farming<input id="fYears" value="52" /></label>
+        <label>Crop<input id="fCrop" value="Koshihikari rice" /></label>
+        <label>Region<input id="fRegion" value="Uonuma, Niigata" /></label>
+        <label>Language<select id="fLang"><option value="en">English</option><option value="ja">日本語</option></select></label>
+      </div>
+      <button id="start" class="primary">Start interview</button>
+    </div>
+
+    <div id="interview" class="hidden two">
+      <div class="card chat">
+        <div id="chatLog"></div>
+        <div class="composer">
+          <textarea id="answer" rows="3" placeholder="Farmer's answer…"></textarea>
+          <div class="row">
+            <button id="mic" title="Record voice answer">🎙 Speak</button>
+            <button id="sample" class="ghost">Use sample answer</button>
+            <button id="send" class="primary">Send</button>
+          </div>
+        </div>
+      </div>
+      <div class="card side">
+        <h3>Knowledge coverage</h3>
+        <div id="coverage"></div>
+        <p class="muted small">Coverage is Gemini's own estimate of how fully each part of a decision rule has been captured.</p>
+        <button id="extract" class="primary wide">Extract judgement records →</button>
+        <div id="extractOut"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="verify" class="tab">
+    <div class="card"><h2>Verification queue</h2>
+      <p class="muted">Every record shows what a generic AI said compared with the expert. A Gemini judge scores the <b>knowledge gap</b> and flags claims that conflict with mainstream guidance. A human reviewer (an extension officer or a peer farmer) then approves, edits or rejects the record. Only verified records go into the dataset.</p>
+      <label class="inline">Reviewer <input id="reviewer" value="JA Extension Officer Sato" /></label>
+      <button id="seedBtn" class="ghost" style="margin-top:10px">Load simulated sample records</button>
+    </div>
+    <div id="queue"></div>
+  </section>
+
+  <section id="dataset" class="tab">
+    <div class="card"><h2>Verified dataset</h2>
+      <div id="stats" class="stats"></div>
+      <div class="row">
+        <a class="btn primary" href="/api/export?format=sft">Download SFT .jsonl</a>
+        <a class="btn" href="/api/export?format=dpo">Download DPO preference pairs</a>
+        <a class="btn" href="/api/export?format=eval">Download eval set + rubric</a>
+      </div>
+      <p class="muted small">SFT: expert answers for fine-tuning. DPO: expert answer (chosen) vs generic AI answer (rejected). Eval: held-out prompts with rubrics built from the insights the generic AI missed.</p>
+    </div>
+    <div id="verifiedList"></div>
+  </section>
+</main>
+<footer>Built on Gemini · Firestore (Firebase) · Cloud Run</footer>
+<script src="app.js"></script>
+</body>
+</html>
