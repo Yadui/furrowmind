@@ -111,6 +111,25 @@ function transcriptText(s) {
   return s.transcript.map((t) => `${t.role === "farmer" ? "FARMER" : "INTERVIEWER"}: ${t.text}`).join("\n");
 }
 
+// ---- Usage alerts: push to the owner's phone (ntfy.sh) on milestone interviews ----
+// NTFY_TOPIC is a private random topic name kept only in the Cloud Run config (never in the repo).
+const NTFY_TOPIC = process.env.NTFY_TOPIC || "";
+const MILESTONES = new Set(String(process.env.NOTIFY_MILESTONES || "1,5,10").split(",").map(Number).filter(Boolean));
+async function notifyInterview(s) {
+  if (!NTFY_TOPIC) return;
+  try {
+    const { count } = await store.txUpdate("usage", "interviewAlerts", (cur) => ({ count: (cur?.count || 0) + 1, createdAt: cur?.createdAt || Date.now() }));
+    if (!MILESTONES.has(count)) return;
+    const today = await store.get("usage", new Date().toISOString().slice(0, 10));
+    const when = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" });
+    const body = `Interview #${count} just used Gemini.\nFarmer name entered: ${String(s.farmerName).slice(0, 40)} (${s.language === "ja" ? "Japanese" : "English"})\nAI calls today: ${today?.geminiCalls || 0} of ${DAILY_GEMINI_CAP}\n${when} IST`;
+    await fetch(`${process.env.NTFY_URL || "https://ntfy.sh"}/${encodeURIComponent(NTFY_TOPIC)}`, {
+      method: "POST", body, signal: AbortSignal.timeout(5000),
+      headers: { Title: `FurrowMind: interview #${count}`, Tags: "seedling", Priority: count === 1 ? "high" : "default" },
+    });
+  } catch (e) { console.error("notify failed:", e.message); } // alerts must never break the app
+}
+
 app.post("/api/sessions", wrap(async (req, res) => {
   const { farmerName = "Anonymous", region = "", crop = "", years = "", language = "en" } = req.body;
   const opener = language === "ja"
@@ -160,6 +179,7 @@ app.post("/api/sessions/:id/turn", upload.single("audio"), wrap(async (req, res)
     };
   });
   res.json(saved);
+  if (s.farmerTurns === 1) notifyInterview(saved); // first answer got a Gemini reply: count this interview (non-blocking)
 }));
 
 // ---------- Extraction + baseline gap (what does a generic model miss?) ----------
